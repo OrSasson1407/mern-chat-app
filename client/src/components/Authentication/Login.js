@@ -11,6 +11,7 @@ import {
 import { useState } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
+import { ChatState } from "../../context/ChatProvider"; // Import ChatState to update global user status
 
 const Login = () => {
   const [show, setShow] = useState(false);
@@ -19,7 +20,9 @@ const Login = () => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  
   const navigate = useNavigate();
+  const { setUser } = ChatState(); // Access setUser from context
 
   const submitHandler = async () => {
     setLoading(true);
@@ -39,11 +42,14 @@ const Login = () => {
       const config = {
         headers: { "Content-type": "application/json" },
       };
+
+      // Ensure the endpoint is correctly targeted via environment variables
       const { data } = await axios.post(
         `${process.env.REACT_APP_ENDPOINT}/api/user/login`,
         { email, password },
         config
       );
+
       toast({
         title: "Login Successful",
         status: "success",
@@ -52,15 +58,21 @@ const Login = () => {
         position: "bottom",
       });
       
-      // CHANGED: localStorage -> sessionStorage
+      // PERSISTENCE: Store complete user data (including blockedUsers) in sessionStorage
       sessionStorage.setItem("userInfo", JSON.stringify(data));
+      
+      // RELIABILITY: Update the global ChatContext state immediately so the app recognizes the login
+      setUser(data);
       
       setLoading(false);
       navigate("/chats");
     } catch (error) {
+      // ENHANCED ERROR HANDLING: Show specific message from backend
+      const errorMsg = error.response?.data?.message || "Login Failed. Please try again.";
+      
       toast({
         title: "Error Occured!",
-        description: error.response?.data?.message || "Login Failed",
+        description: errorMsg,
         status: "error",
         duration: 5000,
         isClosable: true,
@@ -72,7 +84,7 @@ const Login = () => {
 
   return (
     <VStack spacing="5px">
-      <FormControl id="email" isRequired>
+      <FormControl id="email-login" isRequired>
         <FormLabel>Email Address</FormLabel>
         <Input
           value={email}
@@ -80,7 +92,7 @@ const Login = () => {
           onChange={(e) => setEmail(e.target.value)}
         />
       </FormControl>
-      <FormControl id="password" isRequired>
+      <FormControl id="password-login" isRequired>
         <FormLabel>Password</FormLabel>
         <InputGroup>
           <Input

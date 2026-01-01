@@ -22,7 +22,7 @@ const ProfileModal = ({ user, children }) => {
   const { user: loggedInUser, setUser } = ChatState();
   const toast = useToast();
 
-  // Check if this profile user is blocked by the logged-in user
+  // Check if this profile user is currently in the logged-in user's blocked list
   const isBlocked = loggedInUser?.blockedUsers?.includes(user._id);
 
   const handleBlockAction = async () => {
@@ -31,30 +31,39 @@ const ProfileModal = ({ user, children }) => {
         headers: { Authorization: `Bearer ${loggedInUser.token}` },
       };
       
+      // Determine endpoint based on current block status
       const endpoint = isBlocked ? "/api/user/unblock" : "/api/user/block";
+      
       const { data } = await axios.put(
         `${process.env.REACT_APP_ENDPOINT}${endpoint}`,
         { userId: user._id },
         config
       );
 
-      // Update local storage and context with new user data (blocked list)
-      setUser(data); 
-      sessionStorage.setItem("userInfo", JSON.stringify(data));
+      /**
+       * IMPORTANT: The backend 'block'/'unblock' controllers return the updated 
+       * loggedInUser object. We must save this to the global context and 
+       * session storage to trigger UI changes in SingleChat.js.
+       */
+      const updatedUser = { ...loggedInUser, blockedUsers: data.blockedUsers };
+      setUser(updatedUser); 
+      sessionStorage.setItem("userInfo", JSON.stringify(updatedUser));
       
       toast({
         title: isBlocked ? "User Unblocked" : "User Blocked",
         status: "success",
         duration: 3000,
         isClosable: true,
+        position: "bottom",
       });
     } catch (error) {
       toast({
         title: "Error",
-        description: error.message,
+        description: error.response?.data?.message || error.message,
         status: "error",
         duration: 3000,
         isClosable: true,
+        position: "bottom",
       });
     }
   };
@@ -64,7 +73,7 @@ const ProfileModal = ({ user, children }) => {
       {children ? (
         <span onClick={onOpen}>{children}</span>
       ) : (
-        <IconButton d={{ base: "flex" }} icon={<ViewIcon />} onClick={onOpen} />
+        <IconButton display={{ base: "flex" }} icon={<ViewIcon />} onClick={onOpen} />
       )}
       <Modal size="lg" onClose={onClose} isOpen={isOpen} isCentered>
         <ModalOverlay />
@@ -95,13 +104,17 @@ const ProfileModal = ({ user, children }) => {
             </Text>
           </ModalBody>
           <ModalFooter justifyContent="space-between">
-            {/* NEW: Block/Unblock Button */}
+            {/* Show Block/Unblock button only if viewing someone else's profile */}
             {loggedInUser._id !== user._id && (
-                <Button colorScheme={isBlocked ? "green" : "red"} onClick={handleBlockAction}>
+                <Button 
+                  colorScheme={isBlocked ? "green" : "red"} 
+                  onClick={handleBlockAction}
+                  variant="solid"
+                >
                     {isBlocked ? "Unblock User" : "Block User"}
                 </Button>
             )}
-            <Button onClick={onClose}>Close</Button>
+            <Button onClick={onClose} variant="ghost">Close</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>

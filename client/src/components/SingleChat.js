@@ -1,4 +1,3 @@
-//
 import {
   FormControl,
   Input,
@@ -43,6 +42,10 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
   const [showPicker, setShowPicker] = useState(false);
   const [replyingTo, setReplyingTo] = useState(null);
   
+  // --- PAGINATION STATES ---
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+
   // New Feature States
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -69,7 +72,6 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
 
   // --- AUDIO / NOTIFICATION SOUND ---
   const playNotificationSound = () => {
-    // You can replace this URL with a local file path if configured in webpack
     const audio = new Audio(
       "https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3"
     );
@@ -83,7 +85,7 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
   };
 
   const showNotification = (msg) => {
-    playNotificationSound(); // Play sound!
+    playNotificationSound();
     if (Notification.permission === "granted" && document.hidden) {
       new Notification(`New message from ${msg.sender.name}`, {
         body: msg.content,
@@ -96,29 +98,19 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
   const uploadFile = async (file) => {
     const formData = new FormData();
     formData.append("file", file);
-
     try {
-      const config = {
-        headers: { "Content-type": "multipart/form-data" },
-      };
-      // Posts to your local server route (configured in server.js)
-      const { data } = await axios.post(
-        `${ENDPOINT}/api/upload`,
-        formData,
-        config
-      );
-      // Returns local path (e.g., /uploads/filename.png)
-      // Prepend ENDPOINT if necessary depending on proxy setup, 
-      // usually just returning data if it's a relative path is fine for <img> src
+      const config = { headers: { "Content-type": "multipart/form-data" } };
+      const { data } = await axios.post(`${ENDPOINT}/api/upload`, formData, config);
       return `${ENDPOINT}${data}`;
     } catch (error) {
-      console.error("Upload failed", error);
-      toast({ title: "Upload Failed", status: "error" });
+      const errorMsg = error.response?.data?.message || "Upload Failed";
+      toast({ title: "Error", description: errorMsg, status: "error" });
       return null;
     }
   };
 
-  const fetchMessages = async () => {
+  // --- FETCH MESSAGES WITH PAGINATION AND ENHANCED ERROR HANDLING ---
+  const fetchMessages = async (pageNumber = 1) => {
     if (!selectedChat) return;
 
     try {
@@ -126,32 +118,37 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
         headers: { Authorization: `Bearer ${user.token}` },
       };
 
-      setLoading(true);
+      if (pageNumber === 1) setLoading(true);
 
       const { data } = await axios.get(
-        `${ENDPOINT}/api/message/${selectedChat._id}`,
+        `${ENDPOINT}/api/message/${selectedChat._id}?pageNumber=${pageNumber}`,
         config
       );
 
-      setMessages(data);
+      if (pageNumber === 1) {
+        setMessages(data.messages);
+      } else {
+        setMessages((prev) => [...data.messages, ...prev]);
+      }
+
+      setHasMore(pageNumber < data.pages);
       setLoading(false);
-
-      socket.emit("join chat", selectedChat._id);
       
-      // Mark as read immediately upon opening
-      await axios.put(
-        `${ENDPOINT}/api/message/read`,
-        { chatId: selectedChat._id },
-        config
-      );
-      socket.emit("message read", {
-        chatId: selectedChat._id,
-        userId: user._id,
-      });
+      if (socketConnected) {
+        socket.emit("join chat", selectedChat._id);
+      }
+      
+      if (pageNumber === 1) {
+        await axios.put(`${ENDPOINT}/api/message/read`, { chatId: selectedChat._id }, config);
+        if (socketConnected) {
+            socket.emit("message read", { chatId: selectedChat._id, userId: user._id });
+        }
+      }
     } catch (error) {
+      const errorMsg = error.response?.data?.message || "Failed to Load the Messages";
       toast({
         title: "Error Occured!",
-        description: "Failed to Load the Messages",
+        description: errorMsg,
         status: "error",
         duration: 5000,
         isClosable: true,
@@ -161,10 +158,31 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
     }
   };
 
-  // --- SEND MESSAGE (TEXT) ---
+  // --- SEND MESSAGE WITH OPTIMISTIC UI ---
   const sendMessage = async (event) => {
     if (event.key === "Enter" && newMessage) {
-      socket.emit("stop typing", selectedChat._id);
+      if (socketConnected) socket.emit("stop typing", selectedChat._id);
+
+      const tempId = Date.now().toString();
+      const optimisticMessage = {
+        _id: tempId,
+        sender: { _id: user._id, name: user.name, pic: user.pic },
+        content: newMessage,
+        chat: selectedChat,
+        parentMessage: replyingTo ? replyingTo : null,
+        messageType: "text",
+        createdAt: new Date().toISOString(),
+        readBy: [user._id],
+        isSending: true,
+      };
+
+      const messageContent = newMessage;
+      setNewMessage("");
+      setMessages((prev) => [...prev, optimisticMessage]);
+      setReplyingTo(null);
+      setShowPicker(false);
+      setTyping(false);
+
       try {
         const config = {
           headers: {
@@ -173,30 +191,27 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
           },
         };
 
-        const payload = {
-          content: newMessage,
-          chatId: selectedChat._id,
-          parentMessageId: replyingTo ? replyingTo._id : null,
-          messageType: "text",
-        };
-
-        setNewMessage("");
-        setReplyingTo(null);
-        setShowPicker(false);
-        setTyping(false);
-
         const { data } = await axios.post(
           `${ENDPOINT}/api/message`,
-          payload,
+          {
+            content: messageContent,
+            chatId: selectedChat._id,
+            parentMessageId: optimisticMessage.parentMessage?._id,
+            messageType: "text",
+          },
           config
         );
 
-        socket.emit("new message", data);
-        setMessages([...messages, data]);
+        if (socketConnected) socket.emit("new message", data);
+        setMessages((prev) => 
+          prev.map((m) => (m._id === tempId ? data : m))
+        );
       } catch (error) {
+        setMessages((prev) => prev.filter((m) => m._id !== tempId));
+        const errorMsg = error.response?.data?.message || "Failed to send the Message";
         toast({
           title: "Error Occured!",
-          description: "Failed to send the Message",
+          description: errorMsg,
           status: "error",
           duration: 5000,
           isClosable: true,
@@ -206,7 +221,6 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
     }
   };
 
-  // --- HANDLE FILE ATTACHMENT ---
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -239,14 +253,14 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
         config
       );
 
-      socket.emit("new message", data);
+      if (socketConnected) socket.emit("new message", data);
       setMessages([...messages, data]);
     } catch (error) {
-      toast({ title: "Failed to send file", status: "error" });
+      const errorMsg = error.response?.data?.message || "Failed to send file";
+      toast({ title: "Error", description: errorMsg, status: "error" });
     }
   };
 
-  // --- VOICE RECORDING LOGIC ---
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -260,12 +274,8 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
       };
 
       mediaRecorderRef.current.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, {
-          type: "audio/webm",
-        });
-        const audioFile = new File([audioBlob], "voice_note.webm", {
-          type: "audio/webm",
-        });
+        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        const audioFile = new File([audioBlob], "voice_note.webm", { type: "audio/webm" });
 
         toast({ title: "Sending Audio...", status: "info", duration: 2000 });
         const uploadedUrl = await uploadFile(audioFile);
@@ -289,7 +299,7 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
               payload,
               config
             );
-            socket.emit("new message", data);
+            if (socketConnected) socket.emit("new message", data);
             setMessages((prev) => [...prev, data]);
           } catch (error) {
             toast({ title: "Failed to send audio", status: "error" });
@@ -300,12 +310,7 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
       mediaRecorderRef.current.start();
       setRecording(true);
     } catch (err) {
-      toast({
-        title: "Microphone Access Denied",
-        status: "error",
-        duration: 3000,
-      });
-      console.error(err);
+      toast({ title: "Microphone Access Denied", status: "error", duration: 3000 });
     }
   };
 
@@ -313,22 +318,17 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
     if (mediaRecorderRef.current && recording) {
       mediaRecorderRef.current.stop();
       setRecording(false);
-      mediaRecorderRef.current.stream
-        .getTracks()
-        .forEach((track) => track.stop());
+      mediaRecorderRef.current.stream.getTracks().forEach((track) => track.stop());
     }
   };
 
-  // --- FORWARDING ---
   const handleForward = (message) => {
     setNewMessage(`Forwarded: ${message.content}`);
     toast({ title: "Message content copied to input", status: "info" });
   };
 
-  // --- SOCKET EVENT HANDLERS ---
   const typingHandler = (e) => {
     setNewMessage(e.target.value);
-
     if (!socketConnected) return;
 
     if (!typing) {
@@ -343,26 +343,22 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
     var timerLength = 3000;
     setTimeout(() => {
       var timeNow = new Date().getTime();
-      var timeDiff = timeNow - lastTypingTime;
-      if (timeDiff >= timerLength && typing) {
+      if (timeNow - lastTypingTime >= timerLength && typing) {
         socket.emit("stop typing", selectedChat._id);
         setTyping(false);
       }
     }, timerLength);
   };
 
-  // Basic message actions (delete, edit, react)
   const deleteMessage = async (messageId) => {
     try {
       const config = { headers: { Authorization: `Bearer ${user.token}` } };
-      await axios.delete(
-        `${ENDPOINT}/api/message/delete/${messageId}`,
-        config
-      );
-      socket.emit("message deleted", { chatId: selectedChat._id, messageId });
+      await axios.delete(`${ENDPOINT}/api/message/delete/${messageId}`, config);
+      if (socketConnected) socket.emit("message deleted", { chatId: selectedChat._id, messageId });
       setMessages(messages.filter((m) => m._id !== messageId));
     } catch (error) {
-      toast({ title: "Failed to delete", status: "error" });
+      const errorMsg = error.response?.data?.message || "Failed to delete";
+      toast({ title: "Error", description: errorMsg, status: "error" });
     }
   };
 
@@ -374,10 +370,11 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
         { messageId, content: newContent },
         config
       );
-      socket.emit("message edited", data);
+      if (socketConnected) socket.emit("message edited", data);
       setMessages(messages.map((m) => (m._id === messageId ? data : m)));
     } catch (error) {
-      toast({ title: "Failed to edit", status: "error" });
+        const errorMsg = error.response?.data?.message || "Failed to edit";
+        toast({ title: "Error", description: errorMsg, status: "error" });
     }
   };
 
@@ -389,58 +386,86 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
         { messageId, emoji },
         config
       );
-      socket.emit("add reaction", {
+      if (socketConnected) socket.emit("add reaction", {
         chatId: selectedChat._id,
         messageId,
         reactions: data.reactions,
       });
       setMessages(messages.map((m) => (m._id === messageId ? data : m)));
     } catch (error) {
-      toast({ title: "Failed to react", status: "error" });
+        const errorMsg = error.response?.data?.message || "Failed to react";
+        toast({ title: "Error", description: errorMsg, status: "error" });
     }
   };
 
-  // --- SOCKET SETUP ---
+  // --- ENHANCED SOCKET SETUP WITH RECONNECTION LOGIC ---
   useEffect(() => {
     if(!user) return;
-    socket = io(ENDPOINT);
+    
+    // Initialize socket with reconnection parameters
+    socket = io(ENDPOINT, {
+        reconnection: true,
+        reconnectionAttempts: 10,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 5000,
+        timeout: 20000,
+    });
+
     socket.emit("setup", user);
-    socket.on("connected", () => setSocketConnected(true));
+    
+    socket.on("connected", () => {
+        setSocketConnected(true);
+        // Automatically rejoin current chat if we were in one before disconnect
+        if (selectedChatCompare) {
+            socket.emit("join chat", selectedChatCompare._id);
+        }
+    });
+
+    socket.on("reconnect", () => {
+        socket.emit("setup", user);
+        if (selectedChatCompare) {
+            socket.emit("join chat", selectedChatCompare._id);
+        }
+        toast({ title: "Reconnected", status: "success", duration: 2000 });
+    });
+
+    socket.on("connect_error", (err) => {
+        setSocketConnected(false);
+        console.log("Socket connection error:", err.message);
+    });
+
     socket.on("typing", (data) => {
       if (selectedChatCompare && selectedChatCompare._id === data.room) {
         setTypingUser(data.user.name);
         setIsTyping(true);
       }
     });
+
     socket.on("stop typing", (room) => {
       if (selectedChatCompare && selectedChatCompare._id === room) {
         setIsTyping(false);
       }
     });
-    // Online status updates
+
     socket.on("get-users", (users) => setOnlineUsers(users));
 
     return () => {
       socket.disconnect();
+      socket.off();
     };
   }, [user]);
 
-  // --- MESSAGE LISTENER ---
   useEffect(() => {
     const handleMessageReceived = (newMessageRecieved) => {
-      if (
-        !selectedChatCompare ||
-        selectedChatCompare._id !== newMessageRecieved.chat._id
-      ) {
+      if (!selectedChatCompare || selectedChatCompare._id !== newMessageRecieved.chat._id) {
         if (!notification.includes(newMessageRecieved)) {
           setNotification([newMessageRecieved, ...notification]);
           setFetchAgain(!fetchAgain);
-          showNotification(newMessageRecieved); // PLAYS SOUND
+          showNotification(newMessageRecieved);
         }
       } else {
         setMessages((prev) => [...prev, newMessageRecieved]);
-        // Mark as read real-time
-        if (user) {
+        if (user && socketConnected) {
           socket.emit("message read", {
             chatId: selectedChatCompare._id,
             userId: user._id,
@@ -449,7 +474,6 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
       }
     };
     
-    // Listeners for updates
     const handleReadUpdate = (data) => {
         if (selectedChatCompare && selectedChatCompare._id === data.chatId) {
             setMessages((prev) => prev.map((m) => 
@@ -482,29 +506,34 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
         socket.on("reaction received", handleReactionUpdate);
     }
     
-    // Cleanup listeners is tricky with closures, but essential to avoid dupes if component remounts
     return () => {
         if(socket) {
             socket.off("message received", handleMessageReceived);
-            // ... off others
+            socket.off("message read update", handleReadUpdate);
+            socket.off("message edited update", handleEditUpdate);
+            socket.off("message deleted update", handleDeleteUpdate);
+            socket.off("reaction received", handleReactionUpdate);
         }
     };
   });
 
   useEffect(() => {
-    fetchMessages();
+    fetchMessages(1);
+    setPage(1);
     selectedChatCompare = selectedChat;
-    setSearchQuery(""); // Clear search on chat switch
+    setSearchQuery("");
     setSearchOpen(false);
   }, [selectedChat]);
 
-
-  // FILTER MESSAGES LOCALLY
   const displayedMessages = searchQuery
     ? messages.filter((m) =>
         m.content.toLowerCase().includes(searchQuery.toLowerCase())
       )
     : messages;
+
+  const isBlocked = selectedChat?.users.some(u => 
+    user?.blockedUsers?.includes(u._id)
+  );
 
   return (
     <>
@@ -525,7 +554,6 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
               onClick={() => setSelectedChat("")}
             />
 
-            {/* HEADER / SEARCH BAR */}
             {searchOpen ? (
               <Input
                 placeholder="Search in chat..."
@@ -571,13 +599,12 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
                 <UpdateGroupChatModal
                   fetchAgain={fetchAgain}
                   setFetchAgain={setFetchAgain}
-                  fetchMessages={fetchMessages}
+                  fetchMessages={() => fetchMessages(1)}
                 />
               )}
             </Box>
           </Box>
 
-          {/* CHAT BODY */}
           <Box
             display="flex"
             flexDir="column"
@@ -589,14 +616,8 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
             borderRadius="lg"
             overflowY="hidden"
           >
-            {loading ? (
-              <Spinner
-                size="xl"
-                w={20}
-                h={20}
-                alignSelf="center"
-                margin="auto"
-              />
+            {loading && page === 1 ? (
+              <Spinner size="xl" w={20} h={20} alignSelf="center" margin="auto" />
             ) : (
               <div className="messages">
                 <ScrollableChat
@@ -606,25 +627,25 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
                   editMessage={editMessage}
                   addReaction={addReaction}
                   handleForward={handleForward}
+                  fetchMore={() => {
+                    if (hasMore) {
+                      const nextPage = page + 1;
+                      fetchMessages(nextPage);
+                      setPage(nextPage);
+                    }
+                  }}
+                  hasMore={hasMore}
                 />
               </div>
             )}
 
             <FormControl onKeyDown={sendMessage} isRequired mt={3}>
-              {/* TYPING INDICATOR */}
               {isTyping && (
-                <Text
-                  fontSize="xs"
-                  fontStyle="italic"
-                  color="gray.500"
-                  ml={1}
-                  mb={1}
-                >
+                <Text fontSize="xs" fontStyle="italic" color="gray.500" ml={1} mb={1}>
                   {typingUser} is typing...
                 </Text>
               )}
 
-              {/* REPLY PREVIEW */}
               {replyingTo && (
                 <Box
                   bg="white"
@@ -652,19 +673,13 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
                 </Box>
               )}
 
-              {/* EMOJI PICKER */}
               {showPicker && (
                 <Box position="absolute" bottom="60px" zIndex="10">
-                  <Picker
-                    onEmojiClick={(e) =>
-                      setNewMessage((prev) => prev + e.emoji)
-                    }
-                  />
+                  <Picker onEmojiClick={(e) => setNewMessage((prev) => prev + e.emoji)} />
                 </Box>
               )}
 
               <InputGroup>
-                {/* ATTACHMENT BUTTON */}
                 <Box mr={1}>
                   <input
                     type="file"
@@ -674,9 +689,7 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
                   />
                   <IconButton
                     icon={<AttachmentIcon />}
-                    onClick={() =>
-                      document.getElementById("file-upload").click()
-                    }
+                    onClick={() => document.getElementById("file-upload").click()}
                     aria-label="Attach File"
                     isLoading={loading}
                     variant="ghost"
@@ -686,15 +699,15 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
                 <Input
                   variant="filled"
                   bg={inputBg}
-                  placeholder="Enter a message.."
+                  placeholder={isBlocked ? "Unblock this user to send messages" : "Enter a message.."}
                   value={newMessage}
                   onChange={typingHandler}
                   color={textColor}
                   _hover={{ bg: inputBg }}
+                  isDisabled={isBlocked}
                 />
 
                 <InputRightElement width="8.5rem">
-                  {/* GIPHY BUTTON */}
                   <Button
                     size="xs"
                     mr={1}
@@ -707,11 +720,11 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
                         status: "info",
                       })
                     }
+                    isDisabled={isBlocked}
                   >
                     GIF
                   </Button>
 
-                  {/* VOICE RECORD BUTTON */}
                   <IconButton
                     h="1.75rem"
                     size="sm"
@@ -720,15 +733,16 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
                     onClick={recording ? stopRecording : startRecording}
                     icon={<span>{recording ? "⏹" : "🎤"}</span>}
                     isLoading={loading && !recording}
+                    isDisabled={isBlocked}
                   />
 
-                  {/* EMOJI BUTTON */}
                   <IconButton
                     h="1.75rem"
                     size="sm"
                     onClick={() => setShowPicker(!showPicker)}
                     icon={<span>😊</span>}
                     bg="transparent"
+                    isDisabled={isBlocked}
                   />
                 </InputRightElement>
               </InputGroup>
@@ -736,12 +750,7 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
           </Box>
         </>
       ) : (
-        <Box
-          display="flex"
-          alignItems="center"
-          justifyContent="center"
-          h="100%"
-        >
+        <Box display="flex" alignItems="center" justifyContent="center" h="100%">
           <Text fontSize="3xl" fontFamily="Work sans" color={textColor}>
             Click on a user to start chatting
           </Text>

@@ -1,4 +1,3 @@
-//
 const express = require("express");
 const dotenv = require("dotenv");
 const connectDB = require("./config/db");
@@ -7,7 +6,9 @@ const { Server } = require("socket.io");
 const User = require("./models/userModel");
 const path = require("path");
 const fs = require("fs");
-const multer = require("multer"); // NEW: For handling file uploads
+const multer = require("multer");
+const helmet = require("helmet"); // Security headers
+const rateLimit = require("express-rate-limit"); // Rate limiting
 
 const userRoutes = require("./routes/userRoutes");
 const chatRoutes = require("./routes/chatRoutes");
@@ -15,47 +16,88 @@ const messageRoutes = require("./routes/messageRoutes");
 const { notFound, errorHandler } = require("./middleware/errorMiddleware");
 
 dotenv.config();
-connectDB();
+
+// Establish Persistent Connection
+connectDB(); 
+
 const app = express();
 
+// --- SECURITY MIDDLEWARE ---
+app.use(helmet()); // Sets various HTTP headers for security
 app.use(express.json());
 app.use(cors({ origin: "http://localhost:3000" }));
 
-// --- NEW: MULTER SETUP FOR LOCAL STORAGE ---
+// General Rate Limiter: 100 requests per 15 minutes
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: "Too many requests from this IP, please try again after 15 minutes",
+});
+app.use("/api", apiLimiter);
+
+// --- MULTER SETUP WITH VALIDATION ---
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const uploadPath = path.join(__dirname, "uploads");
-    // Ensure directory exists
     if (!fs.existsSync(uploadPath)) {
-      fs.mkdirSync(uploadPath);
+      fs.mkdirSync(uploadPath, { recursive: true }); // Ensure persistent uploads folder
     }
     cb(null, uploadPath);
   },
   filename: (req, file, cb) => {
-    // Generate unique filename: timestamp + original extension
     const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
     cb(null, uniqueSuffix + path.extname(file.originalname));
   },
 });
 
-const upload = multer({ storage: storage });
-
-// --- NEW: UPLOAD ROUTE ---
-app.post("/api/upload", upload.single("file"), (req, res) => {
-  if (!req.file) {
-    return res.status(400).send("No file uploaded.");
+const fileFilter = (req, file, cb) => {
+  // Only allow common safe file types
+  const allowedTypes = ["image/jpeg", "image/png", "image/gif", "audio/mpeg", "audio/webm", "application/pdf"];
+  if (allowedTypes.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error("Invalid file type. Only images, audio, and PDFs are allowed."), false);
   }
-  // Return the path relative to the server
-  res.send(`/uploads/${req.file.filename}`);
+};
+
+const upload = multer({ 
+  storage: storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB Limit
+  fileFilter: fileFilter 
 });
 
-// --- NEW: SERVE STATIC FILES ---
-// This allows the frontend to access http://localhost:5000/uploads/filename.ext
+// --- UPLOAD ROUTE WITH ERROR HANDLING ---
+app.post("/api/upload", (req, res) => {
+  upload.single("file")(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      return res.status(400).json({ message: `Upload error: ${err.message}` });
+    } else if (err) {
+      return res.status(400).json({ message: err.message });
+    }
+    if (!req.file) return res.status(400).send("No file uploaded.");
+    res.send(`/uploads/${req.file.filename}`);
+  });
+});
+
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
+// --- ROUTES ---
 app.use("/api/user", userRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/message", messageRoutes);
+
+// --- DEPLOYMENT PREPARATION ---
+const __dirname1 = path.resolve();
+if (process.env.NODE_ENV === "production") {
+  app.use(express.static(path.join(__dirname1, "/client/build")));
+  app.get("*", (req, res) =>
+    res.sendFile(path.resolve(__dirname1, "client", "build", "index.html"))
+  );
+} else {
+  app.get("/", (req, res) => {
+    res.send("API is running..");
+  });
+}
 
 app.use(notFound);
 app.use(errorHandler);
@@ -63,18 +105,15 @@ app.use(errorHandler);
 const PORT = process.env.PORT || 5000;
 const server = app.listen(PORT, console.log(`Server started on PORT ${PORT}`));
 
+// --- SOCKET.IO ---
 const io = new Server(server, {
   pingTimeout: 60000,
-  cors: {
-    origin: "http://localhost:3000",
-  },
+  cors: { origin: "http://localhost:3000" },
 });
 
 let onlineUsers = [];
 
 io.on("connection", (socket) => {
-  console.log("Connected to socket.io");
-
   socket.on("setup", (userData) => {
     socket.join(userData._id);
     if (!onlineUsers.some((u) => u.userId === userData._id)) {
@@ -86,7 +125,6 @@ io.on("connection", (socket) => {
 
   socket.on("join chat", (room) => {
     socket.join(room);
-    console.log("User Joined Room: " + room);
   });
 
   socket.on("typing", (data) => {
@@ -97,13 +135,17 @@ io.on("connection", (socket) => {
     socket.in(room).emit("stop typing", room);
   });
 
+  // UPDATED: Socket logic for blocked user filtering
   socket.on("new message", (newMessageRecieved) => {
     var chat = newMessageRecieved.chat;
     if (!chat.users) return console.log("chat.users not defined");
 
-    chat.users.forEach((user) => {
-      if (user._id == newMessageRecieved.sender._id) return;
-      socket.in(user._id).emit("message received", newMessageRecieved);
+    // Use the filtered realTimeRecipients list provided by the messageController
+    const recipients = newMessageRecieved.realTimeRecipients || chat.users.map(u => u._id);
+
+    recipients.forEach((userId) => {
+      if (userId == newMessageRecieved.sender._id) return;
+      socket.in(userId).emit("message received", newMessageRecieved);
     });
   });
 
@@ -126,10 +168,10 @@ io.on("connection", (socket) => {
   socket.on("disconnect", async () => {
     const disconnectedUser = onlineUsers.find((u) => u.socketId === socket.id);
     if (disconnectedUser) {
+      // PERSISTENCE: Save last seen to DB on disconnect
       await User.findByIdAndUpdate(disconnectedUser.userId, { lastSeen: new Date() });
       onlineUsers = onlineUsers.filter((u) => u.socketId !== socket.id);
       io.emit("get-users", onlineUsers);
     }
-    console.log("USER DISCONNECTED");
   });
 });
