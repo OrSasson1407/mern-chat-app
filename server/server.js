@@ -9,8 +9,8 @@ const fs = require("fs");
 const multer = require("multer");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
-const cookieParser = require("cookie-parser"); // NEW: Cookie Parser
-const mongoSanitize = require("express-mongo-sanitize"); // NEW: Sanitize Data
+const cookieParser = require("cookie-parser");
+const mongoSanitize = require("express-mongo-sanitize");
 
 const userRoutes = require("./routes/userRoutes");
 const chatRoutes = require("./routes/chatRoutes");
@@ -18,31 +18,74 @@ const messageRoutes = require("./routes/messageRoutes");
 const { notFound, errorHandler } = require("./middleware/errorMiddleware");
 
 dotenv.config();
-
-// Establish Persistent Connection
 connectDB();
 
 const app = express();
 
-// --- SECURITY MIDDLEWARE ---
-app.use(helmet());
-app.use(express.json());
-app.use(cookieParser()); // NEW: Parse cookies
-app.use(mongoSanitize()); // NEW: Prevent NoSQL injection
-app.use(cors({ 
-  origin: "http://localhost:3000",
-  credentials: true // NEW: Allow cookies to be sent from frontend
+/* =========================
+   1️⃣ Security & Parsers
+========================= */
+// ביטול חסימת Cross-Origin של Helmet
+app.use(helmet({
+  crossOriginResourcePolicy: false,
 }));
 
-// General Rate Limiter: 100 requests per 15 minutes
+// ✅ FIX FOR EXPRESS 5:
+// הספריה mongo-sanitize מנסה לכתוב ל-req.query אבל ב-Express 5 הוא נעול.
+// הקוד הזה משחרר אותו כדי שהספריה תעבוד ולא תקריס את השרת.
+app.use((req, res, next) => {
+  Object.defineProperty(req, 'query', {
+    writable: true,
+    enumerable: true,
+    configurable: true,
+    value: req.query
+  });
+  next();
+});
+
+app.use(mongoSanitize());
+app.use(express.json());
+app.use(cookieParser());
+
+/* =========================
+   2️⃣ CORS (Express 5 Safe)
+========================= */
+const allowedOrigins = [
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+];
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    // console.log("❌ Blocked by CORS:", origin);
+    callback(new Error("Not allowed by CORS"));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+};
+
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions)); // Regex fix for Express 5
+
+/* =========================
+   3️⃣ Rate Limiter
+========================= */
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
-  message: "Too many requests from this IP, please try again after 15 minutes",
+  skip: (req) => req.method === "OPTIONS",
 });
+
 app.use("/api", apiLimiter);
 
-// --- MULTER SETUP WITH VALIDATION ---
+/* =========================
+   4️⃣ File Upload
+========================= */
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const uploadPath = path.join(__dirname, "uploads");
@@ -58,65 +101,71 @@ const storage = multer.diskStorage({
 });
 
 const fileFilter = (req, file, cb) => {
-  const allowedTypes = ["image/jpeg", "image/png", "image/gif", "audio/mpeg", "audio/webm", "application/pdf"];
-  if (allowedTypes.includes(file.mimetype)) {
-    cb(null, true);
-  } else {
-    cb(new Error("Invalid file type. Only images, audio, and PDFs are allowed."), false);
-  }
+  const allowed = [
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "audio/mpeg",
+    "audio/webm",
+    "application/pdf",
+  ];
+  allowed.includes(file.mimetype)
+    ? cb(null, true)
+    : cb(new Error("Invalid file type"), false);
 };
 
-const upload = multer({ 
-  storage: storage,
+const upload = multer({
+  storage,
   limits: { fileSize: 5 * 1024 * 1024 },
-  fileFilter: fileFilter 
+  fileFilter,
 });
 
-// --- UPLOAD ROUTE WITH ERROR HANDLING ---
-app.post("/api/upload", (req, res) => {
-  upload.single("file")(req, res, (err) => {
-    if (err instanceof multer.MulterError) {
-      return res.status(400).json({ message: `Upload error: ${err.message}` });
-    } else if (err) {
-      return res.status(400).json({ message: err.message });
-    }
-    if (!req.file) return res.status(400).send("No file uploaded.");
-    res.send(`/uploads/${req.file.filename}`);
-  });
+app.post("/api/upload", upload.single("file"), (req, res) => {
+  if (!req.file) return res.status(400).json({ message: "No file uploaded" });
+  res.json({ path: `/uploads/${req.file.filename}` });
 });
 
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-// --- ROUTES ---
+/* =========================
+   5️⃣ Routes
+========================= */
 app.use("/api/user", userRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/message", messageRoutes);
 
-// --- DEPLOYMENT PREPARATION ---
-const __dirname1 = path.resolve();
+/* =========================
+   6️⃣ Production
+========================= */
+const root = path.resolve();
 if (process.env.NODE_ENV === "production") {
-  app.use(express.static(path.join(__dirname1, "/client/build")));
-  app.get("*", (req, res) =>
-    res.sendFile(path.resolve(__dirname1, "client", "build", "index.html"))
+  app.use(express.static(path.join(root, "client/build")));
+  app.get(/.*/, (req, res) =>
+    res.sendFile(path.resolve(root, "client", "build", "index.html"))
   );
 } else {
-  app.get("/", (req, res) => {
-    res.send("API is running..");
-  });
+  app.get("/", (req, res) => res.send("API running"));
 }
 
+/* =========================
+   7️⃣ Errors & Server
+========================= */
 app.use(notFound);
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
-const server = app.listen(PORT, console.log(`Server started on PORT ${PORT}`));
+const server = app.listen(PORT, () =>
+  console.log(`🚀 Server running on port ${PORT}`)
+);
 
-// --- SOCKET.IO ---
+/* =========================
+   8️⃣ Socket.io
+========================= */
 const io = new Server(server, {
   pingTimeout: 60000,
-  cors: { 
-    origin: "http://localhost:3000",
-    credentials: true 
+  cors: {
+    origin: allowedOrigins,
+    credentials: true,
   },
 });
 
@@ -132,50 +181,18 @@ io.on("connection", (socket) => {
     socket.emit("connected");
   });
 
-  socket.on("join chat", (room) => {
-    socket.join(room);
-  });
-
-  socket.on("typing", (data) => {
-    socket.in(data.room).emit("typing", data);
-  });
-
-  socket.on("stop typing", (room) => {
-    socket.in(room).emit("stop typing", room);
-  });
-
-  socket.on("new message", (newMessageRecieved) => {
-    var chat = newMessageRecieved.chat;
-    if (!chat.users) return console.log("chat.users not defined");
-
-    const recipients = newMessageRecieved.realTimeRecipients || chat.users.map(u => u._id);
-
-    recipients.forEach((userId) => {
-      if (userId == newMessageRecieved.sender._id) return;
-      socket.in(userId).emit("message received", newMessageRecieved);
+  socket.on("new message", (msg) => {
+    msg.chat.users.forEach((u) => {
+      if (u._id !== msg.sender._id) {
+        socket.in(u._id).emit("message received", msg);
+      }
     });
   });
 
-  socket.on("add reaction", (data) => {
-    socket.in(data.chatId).emit("reaction received", data);
-  });
-
-  socket.on("message read", (data) => {
-    socket.in(data.chatId).emit("message read update", data);
-  });
-
-  socket.on("message edited", (updatedMsg) => {
-    socket.in(updatedMsg.chat._id).emit("message edited update", updatedMsg);
-  });
-
-  socket.on("message deleted", (data) => {
-    socket.in(data.chatId).emit("message deleted update", data.messageId);
-  });
-
   socket.on("disconnect", async () => {
-    const disconnectedUser = onlineUsers.find((u) => u.socketId === socket.id);
-    if (disconnectedUser) {
-      await User.findByIdAndUpdate(disconnectedUser.userId, { lastSeen: new Date() });
+    const user = onlineUsers.find((u) => u.socketId === socket.id);
+    if (user) {
+      await User.findByIdAndUpdate(user.userId, { lastSeen: new Date() });
       onlineUsers = onlineUsers.filter((u) => u.socketId !== socket.id);
       io.emit("get-users", onlineUsers);
     }
