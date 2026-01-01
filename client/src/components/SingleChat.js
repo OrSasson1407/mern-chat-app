@@ -103,6 +103,7 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
       const { data } = await axios.post(`${ENDPOINT}/api/upload`, formData, config);
       return `${ENDPOINT}${data}`;
     } catch (error) {
+      // ENHANCED ERROR HANDLING
       const errorMsg = error.response?.data?.message || "Upload Failed";
       toast({ title: "Error", description: errorMsg, status: "error" });
       return null;
@@ -145,6 +146,7 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
         }
       }
     } catch (error) {
+      // ENHANCED ERROR HANDLING
       const errorMsg = error.response?.data?.message || "Failed to Load the Messages";
       toast({
         title: "Error Occured!",
@@ -207,6 +209,7 @@ const SingleChat = ({ fetchAgain, setFetchAgain }) => {
           prev.map((m) => (m._id === tempId ? data : m))
         );
       } catch (error) {
+        // ENHANCED ERROR HANDLING + UI ROLLBACK
         setMessages((prev) => prev.filter((m) => m._id !== tempId));
         const errorMsg = error.response?.data?.message || "Failed to send the Message";
         toast({

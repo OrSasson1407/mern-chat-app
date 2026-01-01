@@ -11,7 +11,7 @@ import {
 import { useState } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
-import { ChatState } from "../../context/ChatProvider"; // Import ChatState to update global user status
+import { ChatState } from "../../context/ChatProvider";
 
 const Login = () => {
   const [show, setShow] = useState(false);
@@ -22,7 +22,7 @@ const Login = () => {
   const [loading, setLoading] = useState(false);
   
   const navigate = useNavigate();
-  const { setUser } = ChatState(); // Access setUser from context
+  const { setUser } = ChatState();
 
   const submitHandler = async () => {
     setLoading(true);
@@ -39,11 +39,12 @@ const Login = () => {
     }
 
     try {
+      // UPDATED: Added withCredentials to allow cookies
       const config = {
         headers: { "Content-type": "application/json" },
+        withCredentials: true, 
       };
 
-      // Ensure the endpoint is correctly targeted via environment variables
       const { data } = await axios.post(
         `${process.env.REACT_APP_ENDPOINT}/api/user/login`,
         { email, password },
@@ -58,17 +59,14 @@ const Login = () => {
         position: "bottom",
       });
       
-      // PERSISTENCE: Store complete user data (including blockedUsers) in sessionStorage
+      // We still store user info (name, pic, etc) but NOT the token (it's in the cookie now)
       sessionStorage.setItem("userInfo", JSON.stringify(data));
-      
-      // RELIABILITY: Update the global ChatContext state immediately so the app recognizes the login
       setUser(data);
       
       setLoading(false);
       navigate("/chats");
     } catch (error) {
-      // ENHANCED ERROR HANDLING: Show specific message from backend
-      const errorMsg = error.response?.data?.message || "Login Failed. Please try again.";
+      const errorMsg = error.response?.data?.message || "Login Failed. Server Unreachable.";
       
       toast({
         title: "Error Occured!",

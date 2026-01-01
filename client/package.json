@@ -10,6 +10,7 @@
     "axios": "^1.6.0",
     "emoji-picker-react": "^4.16.1",
     "framer-motion": "^10.16.4",
+    "peerjs": "^1.5.5",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-icons": "^5.5.0",

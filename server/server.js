@@ -7,8 +7,10 @@ const User = require("./models/userModel");
 const path = require("path");
 const fs = require("fs");
 const multer = require("multer");
-const helmet = require("helmet"); // Security headers
-const rateLimit = require("express-rate-limit"); // Rate limiting
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
+const cookieParser = require("cookie-parser"); // NEW: Cookie Parser
+const mongoSanitize = require("express-mongo-sanitize"); // NEW: Sanitize Data
 
 const userRoutes = require("./routes/userRoutes");
 const chatRoutes = require("./routes/chatRoutes");
@@ -18,14 +20,19 @@ const { notFound, errorHandler } = require("./middleware/errorMiddleware");
 dotenv.config();
 
 // Establish Persistent Connection
-connectDB(); 
+connectDB();
 
 const app = express();
 
 // --- SECURITY MIDDLEWARE ---
-app.use(helmet()); // Sets various HTTP headers for security
+app.use(helmet());
 app.use(express.json());
-app.use(cors({ origin: "http://localhost:3000" }));
+app.use(cookieParser()); // NEW: Parse cookies
+app.use(mongoSanitize()); // NEW: Prevent NoSQL injection
+app.use(cors({ 
+  origin: "http://localhost:3000",
+  credentials: true // NEW: Allow cookies to be sent from frontend
+}));
 
 // General Rate Limiter: 100 requests per 15 minutes
 const apiLimiter = rateLimit({
@@ -40,7 +47,7 @@ const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const uploadPath = path.join(__dirname, "uploads");
     if (!fs.existsSync(uploadPath)) {
-      fs.mkdirSync(uploadPath, { recursive: true }); // Ensure persistent uploads folder
+      fs.mkdirSync(uploadPath, { recursive: true });
     }
     cb(null, uploadPath);
   },
@@ -51,7 +58,6 @@ const storage = multer.diskStorage({
 });
 
 const fileFilter = (req, file, cb) => {
-  // Only allow common safe file types
   const allowedTypes = ["image/jpeg", "image/png", "image/gif", "audio/mpeg", "audio/webm", "application/pdf"];
   if (allowedTypes.includes(file.mimetype)) {
     cb(null, true);
@@ -62,7 +68,7 @@ const fileFilter = (req, file, cb) => {
 
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB Limit
+  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: fileFilter 
 });
 
@@ -108,7 +114,10 @@ const server = app.listen(PORT, console.log(`Server started on PORT ${PORT}`));
 // --- SOCKET.IO ---
 const io = new Server(server, {
   pingTimeout: 60000,
-  cors: { origin: "http://localhost:3000" },
+  cors: { 
+    origin: "http://localhost:3000",
+    credentials: true 
+  },
 });
 
 let onlineUsers = [];
@@ -135,12 +144,10 @@ io.on("connection", (socket) => {
     socket.in(room).emit("stop typing", room);
   });
 
-  // UPDATED: Socket logic for blocked user filtering
   socket.on("new message", (newMessageRecieved) => {
     var chat = newMessageRecieved.chat;
     if (!chat.users) return console.log("chat.users not defined");
 
-    // Use the filtered realTimeRecipients list provided by the messageController
     const recipients = newMessageRecieved.realTimeRecipients || chat.users.map(u => u._id);
 
     recipients.forEach((userId) => {
@@ -168,7 +175,6 @@ io.on("connection", (socket) => {
   socket.on("disconnect", async () => {
     const disconnectedUser = onlineUsers.find((u) => u.socketId === socket.id);
     if (disconnectedUser) {
-      // PERSISTENCE: Save last seen to DB on disconnect
       await User.findByIdAndUpdate(disconnectedUser.userId, { lastSeen: new Date() });
       onlineUsers = onlineUsers.filter((u) => u.socketId !== socket.id);
       io.emit("get-users", onlineUsers);

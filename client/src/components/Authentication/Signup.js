@@ -49,8 +49,10 @@ const Signup = () => {
       return;
     }
     try {
+      // UPDATED: Added withCredentials
       const config = {
         headers: { "Content-type": "application/json" },
+        withCredentials: true,
       };
       
       const { data } = await axios.post(
@@ -66,7 +68,6 @@ const Signup = () => {
         position: "bottom",
       });
       
-      // CHANGED: localStorage -> sessionStorage
       sessionStorage.setItem("userInfo", JSON.stringify(data));
       
       setPicLoading(false);

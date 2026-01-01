@@ -22,7 +22,17 @@ const messageSchema = mongoose.Schema(
     
     // Edit Status
     isEdited: { type: Boolean, default: false },
-
+    location: {
+      lat: { type: Number },
+      lng: { type: Number },
+    },
+    poll: {
+    question: { type: String },
+    options: [{
+    text: { type: String },
+    votes: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }]
+  }]
+},
     // Reactions
     reactions: [
       {

@@ -1,10 +1,36 @@
 const asyncHandler = require("express-async-handler");
 const User = require("../models/userModel");
-const generateToken = require("../utils/generateToken");
+const { generateAccessToken, generateRefreshToken } = require("../utils/generateToken");
+const jwt = require("jsonwebtoken");
 
-// @description     Register new user with enhanced validation
+// Helper to set cookie
+const sendTokenResponse = (user, statusCode, res) => {
+  const accessToken = generateAccessToken(user._id);
+  const refreshToken = generateRefreshToken(user._id);
+
+  // Options for cookie
+  const options = {
+    expires: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
+    httpOnly: true, // Not accessible via JS
+    secure: process.env.NODE_ENV === "production", // HTTPS only in prod
+    sameSite: "strict", // CSRF protection
+  };
+
+  res
+    .status(statusCode)
+    .cookie("jwt", refreshToken, options)
+    .json({
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      pic: user.pic,
+      token: accessToken, // Frontend uses this
+      blockedUsers: user.blockedUsers,
+    });
+};
+
+// @description     Register new user
 // @route           POST /api/user
-// @access          Public
 const registerUser = asyncHandler(async (req, res) => {
   const { name, email, password, pic } = req.body;
 
@@ -13,14 +39,12 @@ const registerUser = asyncHandler(async (req, res) => {
     throw new Error("Please Enter all the Fields");
   }
 
-  // Email Format Validation
   const emailRegex = /^\S+@\S+\.\S+$/;
   if (!emailRegex.test(email)) {
     res.status(400);
     throw new Error("Invalid email format");
   }
 
-  // Password Strength Check (Minimum 6 characters)
   if (password.length < 6) {
     res.status(400);
     throw new Error("Password must be at least 6 characters long");
@@ -41,14 +65,7 @@ const registerUser = asyncHandler(async (req, res) => {
   });
 
   if (user) {
-    res.status(201).json({
-      _id: user._id,
-      name: user.name,
-      email: user.email,
-      pic: user.pic,
-      token: generateToken(user._id),
-      blockedUsers: user.blockedUsers,
-    });
+    sendTokenResponse(user, 201, res);
   } else {
     res.status(400);
     throw new Error("Failed to Create the User");
@@ -57,30 +74,61 @@ const registerUser = asyncHandler(async (req, res) => {
 
 // @description     Auth the user & get token
 // @route           POST /api/user/login
-// @access          Public
 const authUser = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
 
   const user = await User.findOne({ email });
 
   if (user && (await user.matchPassword(password))) {
-    res.json({
-      _id: user._id,
-      name: user.name,
-      email: user.email,
-      pic: user.pic,
-      token: generateToken(user._id),
-      blockedUsers: user.blockedUsers, // Send blocked list to frontend for instant state sync
-    });
+    sendTokenResponse(user, 200, res);
   } else {
     res.status(401);
     throw new Error("Invalid Email or Password");
   }
 });
 
-// @description     Get or Search all users (Excluding the logged-in user)
+// @description     Refresh Access Token
+// @route           GET /api/user/refresh
+// @access          Public (Cookie based)
+const refreshAccessToken = asyncHandler(async (req, res) => {
+  const cookie = req.cookies.jwt;
+
+  if (!cookie) {
+    res.status(401);
+    throw new Error("No refresh token, please login");
+  }
+
+  try {
+    const decoded = jwt.verify(cookie, process.env.JWT_REFRESH_SECRET);
+    
+    // Check if user still exists
+    const user = await User.findById(decoded.id);
+    if(!user) {
+        res.status(401);
+        throw new Error("User not found");
+    }
+
+    const accessToken = generateAccessToken(user._id);
+
+    res.json({ token: accessToken });
+  } catch (error) {
+    res.status(401);
+    throw new Error("Invalid refresh token");
+  }
+});
+
+// @description     Logout user
+// @route           POST /api/user/logout
+const logoutUser = asyncHandler(async (req, res) => {
+  res.cookie("jwt", "", {
+    httpOnly: true,
+    expires: new Date(0),
+  });
+  res.status(200).json({ message: "Logged out successfully" });
+});
+
+// @description     Get or Search all users
 // @route           GET /api/user?search=name
-// @access          Protected
 const allUsers = asyncHandler(async (req, res) => {
   const keyword = req.query.search
     ? {
@@ -91,49 +139,46 @@ const allUsers = asyncHandler(async (req, res) => {
       }
     : {};
 
-  // This ensures you can still search all users except yourself
   const users = await User.find(keyword).find({ _id: { $ne: req.user._id } });
   res.send(users);
 });
 
-// @description     Block a user
-// @route           PUT /api/user/block
-// @access          Protected
 const blockUser = asyncHandler(async (req, res) => {
   const { userId } = req.body;
-  
   if (!userId) {
     res.status(400);
     throw new Error("User ID is required to block");
   }
-
   const user = await User.findByIdAndUpdate(
     req.user._id,
-    { $addToSet: { blockedUsers: userId } }, // Add user to blocked list without duplicates
-    { new: true }
-  ).select("-password"); // Return updated user without password for frontend state sync
-
-  res.json(user);
-});
-
-// @description     Unblock a user
-// @route           PUT /api/user/unblock
-// @access          Protected
-const unblockUser = asyncHandler(async (req, res) => {
-  const { userId } = req.body;
-
-  if (!userId) {
-    res.status(400);
-    throw new Error("User ID is required to unblock");
-  }
-
-  const user = await User.findByIdAndUpdate(
-    req.user._id,
-    { $pull: { blockedUsers: userId } }, // Remove user from blocked list
+    { $addToSet: { blockedUsers: userId } },
     { new: true }
   ).select("-password");
 
   res.json(user);
 });
 
-module.exports = { registerUser, authUser, allUsers, blockUser, unblockUser };
+const unblockUser = asyncHandler(async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) {
+    res.status(400);
+    throw new Error("User ID is required to unblock");
+  }
+  const user = await User.findByIdAndUpdate(
+    req.user._id,
+    { $pull: { blockedUsers: userId } },
+    { new: true }
+  ).select("-password");
+
+  res.json(user);
+});
+
+module.exports = { 
+    registerUser, 
+    authUser, 
+    refreshAccessToken, 
+    logoutUser,
+    allUsers, 
+    blockUser, 
+    unblockUser 
+};

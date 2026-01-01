@@ -1,4 +1,4 @@
-import { ViewIcon } from "@chakra-ui/icons";
+import { PhoneIcon, ViewIcon, ChatIcon } from "@chakra-ui/icons";
 import {
   Modal,
   ModalOverlay,
@@ -13,17 +13,50 @@ import {
   Text,
   Image,
   useToast,
+  HStack,
 } from "@chakra-ui/react";
 import axios from "axios";
 import { ChatState } from "../../context/ChatProvider";
 
 const ProfileModal = ({ user, children }) => {
   const { isOpen, onOpen, onClose } = useDisclosure();
-  const { user: loggedInUser, setUser } = ChatState();
+  const { user: loggedInUser, setUser, socket, startCall } = ChatState();
   const toast = useToast();
 
-  // Check if this profile user is currently in the logged-in user's blocked list
   const isBlocked = loggedInUser?.blockedUsers?.includes(user._id);
+
+  // --- INTEGRATED: WEBRTC CALLING LOGIC ---
+  const initiateCall = (isVideo = false) => {
+    if (isBlocked) {
+      toast({
+        title: "Action Restricted",
+        description: "You cannot call a blocked user.",
+        status: "warning",
+        duration: 3000,
+        isClosable: true,
+      });
+      return;
+    }
+
+    // 1. Notify the server via Socket (for ringing/notifications)
+    socket.emit("call-user", {
+      userToCall: user._id,
+      from: loggedInUser._id,
+      name: loggedInUser.name,
+      isVideo: isVideo,
+    });
+
+    // 2. Trigger PeerJS logic from ChatProvider
+    onClose(); // Close the profile modal before starting call
+    startCall(user._id); 
+
+    toast({
+      title: isVideo ? "Starting Video Call..." : "Starting Voice Call...",
+      status: "info",
+      duration: 2000,
+      isClosable: true,
+    });
+  };
 
   const handleBlockAction = async () => {
     try {
@@ -31,7 +64,6 @@ const ProfileModal = ({ user, children }) => {
         headers: { Authorization: `Bearer ${loggedInUser.token}` },
       };
       
-      // Determine endpoint based on current block status
       const endpoint = isBlocked ? "/api/user/unblock" : "/api/user/block";
       
       const { data } = await axios.put(
@@ -40,11 +72,6 @@ const ProfileModal = ({ user, children }) => {
         config
       );
 
-      /**
-       * IMPORTANT: The backend 'block'/'unblock' controllers return the updated 
-       * loggedInUser object. We must save this to the global context and 
-       * session storage to trigger UI changes in SingleChat.js.
-       */
       const updatedUser = { ...loggedInUser, blockedUsers: data.blockedUsers };
       setUser(updatedUser); 
       sessionStorage.setItem("userInfo", JSON.stringify(updatedUser));
@@ -75,9 +102,10 @@ const ProfileModal = ({ user, children }) => {
       ) : (
         <IconButton display={{ base: "flex" }} icon={<ViewIcon />} onClick={onOpen} />
       )}
+
       <Modal size="lg" onClose={onClose} isOpen={isOpen} isCentered>
         <ModalOverlay />
-        <ModalContent h="410px">
+        <ModalContent h="450px">
           <ModalHeader
             fontSize="40px"
             fontFamily="Work sans"
@@ -98,21 +126,46 @@ const ProfileModal = ({ user, children }) => {
               boxSize="150px"
               src={user.pic}
               alt={user.name}
+              border="2px solid #E8E8E8"
             />
-            <Text fontSize={{ base: "28px", md: "30px" }} fontFamily="Work sans">
+            <Text fontSize={{ base: "24px", md: "30px" }} fontFamily="Work sans">
               Email: {user.email}
             </Text>
-          </ModalBody>
-          <ModalFooter justifyContent="space-between">
-            {/* Show Block/Unblock button only if viewing someone else's profile */}
+            
+            {/* Calling Actions Row */}
             {loggedInUser._id !== user._id && (
-                <Button 
-                  colorScheme={isBlocked ? "green" : "red"} 
-                  onClick={handleBlockAction}
-                  variant="solid"
-                >
-                    {isBlocked ? "Unblock User" : "Block User"}
-                </Button>
+              <HStack spacing={4} mt={4}>
+                <IconButton
+                  colorScheme="green"
+                  aria-label="Voice Call"
+                  icon={<PhoneIcon />}
+                  isRound
+                  size="lg"
+                  onClick={() => initiateCall(false)}
+                  isDisabled={isBlocked}
+                />
+                <IconButton
+                  colorScheme="blue"
+                  aria-label="Video Call"
+                  icon={<ChatIcon />} 
+                  isRound
+                  size="lg"
+                  onClick={() => initiateCall(true)}
+                  isDisabled={isBlocked}
+                />
+              </HStack>
+            )}
+          </ModalBody>
+
+          <ModalFooter justifyContent="space-between">
+            {loggedInUser._id !== user._id && (
+              <Button 
+                colorScheme={isBlocked ? "green" : "red"} 
+                onClick={handleBlockAction}
+                variant="solid"
+              >
+                {isBlocked ? "Unblock User" : "Block User"}
+              </Button>
             )}
             <Button onClick={onClose} variant="ghost">Close</Button>
           </ModalFooter>
