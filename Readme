@@ -1,0 +1,11 @@
+express: The web framework.
+
+mongoose: To connect to MongoDB.
+
+dotenv: To manage secrets (passwords/keys).
+
+cors: To allow your Frontend (Port 5173) to talk to Backend (Port 5000).
+
+socket.io: The real-time engine.
+
+nodemon: Automatically restarts the server when you save code.
